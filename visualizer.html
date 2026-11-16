@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tab Visualizer</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #15112a;
+    --panel: rgba(255, 255, 255, 0.08);
+    --text: #f3eefc;
+    --muted: #b5abd1;
+    --accent: #ff7a90;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: Georgia, "Times New Roman", serif; display: flex; flex-direction: column; }
+  header { padding: 16px 20px 8px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  h1 { font-size: 1.25rem; font-weight: 600; margin: 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { font: inherit; font-size: 0.95rem; color: var(--text); background: var(--panel); border: 1px solid transparent; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:hover { background: rgba(255, 255, 255, 0.14); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button[aria-pressed="true"] { border-color: var(--accent); }
+  #start { background: var(--accent); color: #2a0f18; font-weight: 600; }
+  main { flex: 1; position: relative; min-height: 0; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #msg { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 34ch; text-align: center; color: var(--muted); line-height: 1.5; }
+  #msg.hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tab Visualizer</h1>
+  <div class="controls">
+    <button id="start">Share tab audio</button>
+    <button data-mode="bars" aria-pressed="true">Bars</button>
+    <button data-mode="ring" aria-pressed="false">Ring</button>
+    <button data-mode="wave" aria-pressed="false">Wave</button>
+  </div>
+</header>
+<main>
+  <canvas id="c"></canvas>
+  <p id="msg">Open Apple Music in another tab and start a song. Then press Share tab audio, choose that tab, and tick “Share tab audio”.</p>
+</main>
+
+<script>
+// ---------- Setup ----------
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const msg = document.getElementById('msg');
+let mode = 'bars';
+let analyser = null;     // Web Audio node that gives us frequency/waveform data
+let freq = null;         // array filled with frequency strengths (0-255)
+let wave = null;         // array filled with waveform samples (0-255)
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr;
+  canvas.height = r.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- Mode buttons ----------
+document.querySelectorAll('[data-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    mode = btn.dataset.mode;
+    document.querySelectorAll('[data-mode]').forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+  });
+});
+
+// ---------- Audio capture ----------
+// getDisplayMedia lets the user share a browser tab. If they tick "Share tab audio",
+// we get that tab's sound as a stream and can analyse it.
+document.getElementById('start').addEventListener('click', async () => {
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    if (stream.getAudioTracks().length === 0) {
+      stream.getTracks().forEach(t => t.stop());
+      showMsg('No audio came through. Choose a Chrome tab (not a window) and tick “Share tab audio”.');
+      return;
+    }
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.8;   // higher = smoother, slower to react
+    source.connect(analyser);                // not connected to speakers, so no echo
+    freq = new Uint8Array(analyser.frequencyBinCount);
+    wave = new Uint8Array(analyser.fftSize);
+    msg.classList.add('hidden');
+    stream.getVideoTracks().forEach(t => t.stop()); // we only need the sound
+  } catch (err) {
+    showMsg('Sharing was blocked or cancelled (' + err.name + '). Use Chrome or Edge on a desktop, and if this page is embedded, open it in its own tab.');
+  }
+});
+
+function showMsg(text) { msg.textContent = text; msg.classList.remove('hidden'); }
+
+// ---------- Drawing ----------
+// Colour follows pitch: low sounds are warm, high sounds are cool.
+const hue = t => 340 - t * 160;
+
+function drawBars(w, h) {
+  const n = 64;                              // bars to show
+  const step = Math.floor(freq.length * 0.7 / n); // skip the very top, it's mostly empty
+  const bw = w / n;
+  for (let i = 0; i < n; i++) {
+    const v = freq[i * step] / 255;
+    const bh = Math.max(2, v * h * 0.85);
+    ctx.fillStyle = `hsl(${hue(i / n)} 90% ${50 + v * 15}%)`;
+    ctx.fillRect(i * bw + 2, h - bh, bw - 4, bh);
+  }
+}
+
+function drawRing(w, h) {
+  const cx = w / 2, cy = h / 2;
+  const base = Math.min(w, h) * 0.2;
+  const n = 96;
+  const bass = (freq[1] + freq[2] + freq[3]) / 3 / 255; // low frequencies make the ring pulse
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const v = freq[Math.floor((i / n) * freq.length * 0.6)] / 255;
+    const r1 = base * (1 + bass * 0.3);
+    const r2 = r1 + v * Math.min(w, h) * 0.28;
+    ctx.strokeStyle = `hsl(${hue(i / n)} 90% 60%)`;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+    ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+    ctx.stroke();
+  }
+}
+
+function drawWave(w, h) {
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#ff7a90';
+  ctx.beginPath();
+  for (let i = 0; i < wave.length; i++) {
+    const x = (i / (wave.length - 1)) * w;
+    const y = (wave[i] / 255) * h;           // 128 is silence, so it sits in the middle
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  if (!analyser) return;
+  analyser.getByteFrequencyData(freq);
+  analyser.getByteTimeDomainData(wave);
+  if (mode === 'bars') drawBars(w, h);
+  else if (mode === 'ring') drawRing(w, h);
+  else drawWave(w, h);
+}
+frame();
+</script>
+</body>
+</html>
